@@ -1,5 +1,5 @@
 #############################################################################
-# 0) INSTALL & IMPORT PYDRIVE (if not in Colab, you'll need a credentials flow)
+# 0) INSTALL & IMPORT PYDRIVE AND OTHER LIBRARIES
 #############################################################################
 # pip install pydrive
 
@@ -8,104 +8,117 @@ from pydrive.drive import GoogleDrive
 
 import pandas as pd
 import io
+import re
 from datetime import datetime
 
 #############################################################################
-# 1) Authenticate and connect to Google Drive
+# 1) Prompt for the Google Drive folder URL and extract the folder ID
 #############################################################################
-# If you're in a local environment, you'll need client_secrets.json, etc.
-# If you're in Google Colab, you can use GoogleAuth default flow or `from google.colab import drive`
+folder_url = input("Enter the Google Drive folder URL: ").strip()
 
+# Look for the folder ID pattern in the URL (after "/folders/")
+match = re.search(r'/folders/([a-zA-Z0-9_-]+)', folder_url)
+if match:
+    folder_id = match.group(1)
+    print(f"Using folder ID: {folder_id}")
+else:
+    print("Could not parse a folder ID from the URL. Exiting.")
+    exit(1)
+
+#############################################################################
+# 2) Authenticate with Google Drive using your client secret in the working directory
+#############################################################################
 gauth = GoogleAuth()
-gauth.LocalWebserverAuth()  # or use gauth.CommandLineAuth(), etc.
+# If your client secret file is named something else, set it explicitly:
+# gauth.DEFAULT_SETTINGS['client_config_file'] = 'my_client_secret.json'
+gauth.LocalWebserverAuth()  # Opens your browser for authentication
 drive = GoogleDrive(gauth)
 
 #############################################################################
-# 2) Set your target folder ID
-#    This is from the link: 
-#    https://drive.google.com/drive/u/0/folders/1nLtii0QuxBflmLhaMUR6lhjJnrF46kTh
-#############################################################################
-folder_id = "1nLtii0QuxBflmLhaMUR6lhjJnrF46kTh"
-
-#############################################################################
-# 3) Dictionary for "Revenue" column (by specifier).
-#    We'll match the *specifier* from the filename to get the correct col name.
-#
-#    E.g. a file named "Paid Features Report 1-2025.csv" => specifier="Paid Features"
-#    Then you look up revenue_column_map["Paid Features"] => "Earnings (USD)"
-#
-#    Adjust as needed. If "Report" is part of specifier, adapt logic below.
+# 3) Revenue column mapping (using your original mapping)
 #############################################################################
 revenue_column_map = {
-    "Paid Features": "Earnings (USD)",
+    "Subscription Revenue Video Report": "Partner Revenue",
+    "Paid Features Report": "Earnings (USD)",
+    "Non Music Video Summary Premium": "Partner Revenue",
     "Shorts Ads Revenue": "Net Partner Revenue (Post revshare)",
     "Ads Revenue Video Summary": "Partner Revenue",
-    "Ads Adjustment": "Partner Revenue",
-    "Subscription Revenue Video": "Partner Revenue",
-    "Non Music Video Summary Premium": "Partner Revenue",
-    "Shorts Subscription Revenue": "Partner Revenue",
-    # add more if needed ...
+    "Ads Adjustment Report": "Partner Revenue",
+    "Shorts Subscription Revenue": "Partner Revenue"
 }
 
 #############################################################################
-# 4) Helper: parse the new filename format
-#    e.g. "Paid Features Report 1-2025.csv"
-#    => date_str = "1-2025"
-#       specifier = "Paid Features" (or "Paid Features Report" if we keep 'Report')
+# 4) List of filename prefixes for which we always skip the first row
+#############################################################################
+skip_first_row_prefixes = [
+    "Subscription Revenue Video Report",
+    "Paid Features Report",
+    "Shorts Subscription Revenue Video Summary",
+    "Premium Non Music Asset Video Summary"
+]
+
+#############################################################################
+# 5) Helper: parse the new filename format and normalize the specifier
 #
-#    Adjust your logic to remove the trailing "Report" if you like.
+# Expected file names:
+#   "Paid Features Report 1-2025.csv"          -> specifier: "Paid Features Report"
+#   "Subscription Revenue Video Report 1-2025.csv" -> specifier: "Subscription Revenue Video Report"
+#   "Shorts Ads Revenue Video Summary 1-2025.csv"   -> specifier: "Shorts Ads Revenue"
+#   "Ads Revenue Video Summary 1-2025.csv"          -> specifier: "Ads Revenue Video Summary"
+#   "Ads Adjustment Video Summary Report 1-2025.csv"-> specifier: "Ads Adjustment Report"
+#   "Shorts Subscription Revenue Video Summary 1-2025.csv" -> specifier: "Shorts Subscription Revenue"
+#   "Premium Non Music Asset Video Summary 1-2025.csv" -> specifier: "Non Music Video Summary Premium"
 #############################################################################
 def parse_filename(file_name: str):
-    # Remove '.csv'
+    # Remove the .csv extension if present.
     if file_name.lower().endswith('.csv'):
         file_name = file_name[:-4].strip()
-        
-    # Split on spaces
+    
     parts = file_name.split()
+    # Assume the last part is the date portion (e.g., "1-2025")
+    date_str = parts[-1]
+    raw_specifier = " ".join(parts[:-1])
     
-    # Last "word" is presumably the date portion, e.g. '1-2025'
-    date_str = parts[-1] 
-    # Everything else is the specifier
-    specifier = " ".join(parts[:-1])
+    # Normalize the specifier to match the keys in revenue_column_map.
+    if raw_specifier.startswith("Shorts Ads Revenue"):
+        specifier = "Shorts Ads Revenue"
+    elif raw_specifier.startswith("Ads Adjustment"):
+        specifier = "Ads Adjustment Report"
+    elif raw_specifier.startswith("Shorts Subscription Revenue"):
+        specifier = "Shorts Subscription Revenue"
+    elif raw_specifier.startswith("Premium Non Music Asset"):
+        specifier = "Non Music Video Summary Premium"
+    else:
+        # Leave others unchanged.
+        specifier = raw_specifier
     
-    # OPTIONAL: If the specifier ends with "Report", remove that
-    if specifier.endswith("Report"):
-        specifier = specifier[: -len("Report")].strip()
-        
     return date_str, specifier
 
 #############################################################################
-# 5) Try reading CSV from Drive with skiprows=0 or skiprows=1
+# 6) Function to read CSV content with optional forced skipping of the first row
 #############################################################################
-def try_read_csv(file_content: str, skip_first_row_if_needed=True) -> pd.DataFrame:
-    """
-    Attempt to parse 'file_content' as CSV with skiprows=0, 
-    and if the needed columns are missing, try skiprows=1.
-    Returns the best DataFrame it can get; if fails, returns None.
-    """
-    # First attempt: skiprows=0
-    df = pd.read_csv(io.StringIO(file_content))
-    df.columns = [c.strip() for c in df.columns]
-    
-    # If "Channel ID" column is found, we're good
-    if "Channel ID" in df.columns:
+def try_read_csv(file_content: str, force_skip=False, skip_first_row_if_needed=True) -> pd.DataFrame:
+    if force_skip:
+        df = pd.read_csv(io.StringIO(file_content), skiprows=1)
+        df.columns = [c.strip() for c in df.columns]
         return df
-    
-    # If skip_first_row_if_needed is True, try again with skiprows=1
-    if skip_first_row_if_needed:
-        df2 = pd.read_csv(io.StringIO(file_content), skiprows=1)
-        df2.columns = [c.strip() for c in df2.columns]
-        if "Channel ID" in df2.columns:
-            return df2
-    
-    return None
+    else:
+        # First, try reading without skipping rows.
+        df = pd.read_csv(io.StringIO(file_content))
+        df.columns = [c.strip() for c in df.columns]
+        if "Channel ID" in df.columns:
+            return df
+        if skip_first_row_if_needed:
+            df2 = pd.read_csv(io.StringIO(file_content), skiprows=1)
+            df2.columns = [c.strip() for c in df2.columns]
+            if "Channel ID" in df2.columns:
+                return df2
+        return None
 
 #############################################################################
-# 6) Gather all channel IDs -> display names (like your old approach).
-#    We'll store them in a big DataFrame and create a final_lookup dict
+# 7) Helper: Extract channel mapping data from a DataFrame
 #############################################################################
 def extract_channel_data(df):
-    # If has columns [Channel ID, Channel Display Name], return that subset
     if 'Channel ID' in df.columns and 'Channel Display Name' in df.columns:
         return df[['Channel ID', 'Channel Display Name']]
     return pd.DataFrame(columns=['Channel ID', 'Channel Display Name'])
@@ -113,48 +126,55 @@ def extract_channel_data(df):
 all_channel_data = pd.DataFrame(columns=['Channel ID', 'Channel Display Name'])
 
 #############################################################################
-# 7) List all CSV files in the Drive folder
+# 8) List all CSV files in the Drive folder
 #############################################################################
-file_list = drive.ListFile({'q': f"'{folder_id}' in parents and mimeType='text/csv'"}).GetList()
+file_list = drive.ListFile({
+    'q': f"'{folder_id}' in parents and mimeType='text/csv'"
+}).GetList()
 
-# We'll store each final row for the consolidated DataFrame
+# This will hold our aggregated rows.
 all_rows = []
 
 for f in file_list:
-    file_name = f['title']  # e.g. "Paid Features Report 1-2025.csv"
+    file_name = f['title']  # e.g., "Paid Features Report 1-2025.csv"
     
-    # Parse out the date & specifier from the filename
-    date_str, specifier = parse_filename(file_name)
-    
-    # Check if we have a known revenue column for this specifier
-    revenue_col = revenue_column_map.get(specifier, None)
-    if not revenue_col:
-        # If not found, you could skip or set a default. Let's just skip with a warning:
-        print(f"[WARNING] No revenue column mapping found for '{file_name}' (specifier='{specifier}'). Skipping.")
-        continue
-    
-    # Download file content from Drive
-    downloaded = f.GetContentString()  # entire CSV as a string
-    
-    # Read the CSV (try skiprows=0, if needed skiprows=1)
-    df = try_read_csv(downloaded, skip_first_row_if_needed=True)
-    if df is None:
-        print(f"[WARNING] Could not parse '{file_name}' even after trying skiprows=0 & skiprows=1. Skipping.")
+    # Skip the output file if it exists in the folder.
+    if file_name.startswith("Consolidated Earnings Sheet"):
         continue
 
-    # Clean up the columns
-    df.columns = [c.strip() for c in df.columns]
+    # Determine if we need to force skipping the first row.
+    force_skip = any(file_name.startswith(prefix) for prefix in skip_first_row_prefixes)
     
-    # Attempt to extract channel data for the global map
+    # Parse the date and specifier from the filename.
+    date_str, specifier = parse_filename(file_name)
+    
+    # Look up the revenue column using the normalized specifier.
+    revenue_col = revenue_column_map.get(specifier, None)
+    if not revenue_col:
+        print(f"[WARNING] No revenue column mapping found for '{file_name}' (specifier='{specifier}'). Skipping.")
+        continue
+
+    # Download the CSV file content.
+    downloaded = f.GetContentString()
+    
+    # Read the CSV.
+    df = try_read_csv(downloaded, force_skip=force_skip, skip_first_row_if_needed=True)
+    if df is None:
+        print(f"[WARNING] Could not parse '{file_name}' even after trying skiprows options. Skipping.")
+        continue
+
+    # Clean up column names.
+    df.columns = [c.strip() for c in df.columns]
+
+    # Aggregate channel mapping data.
     channel_subset = extract_channel_data(df)
     all_channel_data = pd.concat([all_channel_data, channel_subset], ignore_index=True).drop_duplicates()
 
-    # Check that "Channel ID" is present
     if "Channel ID" not in df.columns:
-        print(f"[WARNING] 'Channel ID' column not found in '{file_name}' after reading. Skipping.")
+        print(f"[WARNING] 'Channel ID' column not found in '{file_name}'. Skipping.")
         continue
 
-    # Summarize by Channel ID (and Channel Display Name if available)
+    # Group the data by Channel ID (and Channel Display Name if available).
     if "Channel" in df.columns:
         grouped_df = (
             df.groupby(["Channel ID", "Channel"], dropna=False, as_index=False)[revenue_col]
@@ -164,41 +184,37 @@ for f in file_list:
             columns={
                 "Channel": "Channel Display Name",
                 revenue_col: "Value"
-            }, 
+            },
             inplace=True
         )
     else:
-        # Just group by Channel ID
         grouped_df = (
             df.groupby("Channel ID", dropna=False, as_index=False)[revenue_col]
               .sum()
               .rename(columns={revenue_col: "Value"})
         )
-        # We'll fill in "Channel Display Name" later from our final lookup
         grouped_df["Channel Display Name"] = None
 
-    # For each row in grouped_df, add to all_rows
+    # Append each row to our aggregated list.
     for _, row in grouped_df.iterrows():
         all_rows.append({
             "date_str": date_str,
             "specifier": specifier,
             "Channel ID": row["Channel ID"],
-            "Channel Display Name": row["Channel Display Name"] if "Channel Display Name" in row else None,
+            "Channel Display Name": row["Channel Display Name"] if pd.notna(row["Channel Display Name"]) else None,
             "Value": row["Value"],
             "revenue_col": revenue_col
         })
 
 #############################################################################
-# 8) Now that we've aggregated all channel data, build the final_lookup
+# 9) Build a final Channel ID -> Display Name lookup
 #############################################################################
-# Group by Display Name => gather all Channel IDs in a list
 channel_mapping = (
     all_channel_data.groupby('Channel Display Name')['Channel ID']
     .apply(list)
     .reset_index()
 )
 
-# Expand that list out
 expanded_channel_mapping = (
     channel_mapping
     .set_index('Channel Display Name')['Channel ID']
@@ -207,11 +223,10 @@ expanded_channel_mapping = (
 )
 
 expanded_channel_mapping.columns = (
-    ['Channel Display Name'] 
-    + [f'Channel ID {i+1}' for i in range(expanded_channel_mapping.shape[1] - 1)]
+    ['Channel Display Name'] +
+    [f'Channel ID {i+1}' for i in range(expanded_channel_mapping.shape[1] - 1)]
 )
 
-# Build dict: each Channel ID -> Display Name
 final_lookup = {}
 for _, row in expanded_channel_mapping.iterrows():
     display_name = row["Channel Display Name"]
@@ -222,19 +237,18 @@ for _, row in expanded_channel_mapping.iterrows():
                 final_lookup[str(ch_id).strip()] = display_name
 
 #############################################################################
-# 9) Convert all_rows to a final DataFrame and fill in missing display names
+# 10) Create the final consolidated DataFrame
 #############################################################################
 final_df = pd.DataFrame(all_rows)
 
-# If "Channel Display Name" is None or empty, attempt to map from final_lookup
+# Fill in missing Channel Display Names from the lookup.
 final_df["Channel Display Name"] = final_df.apply(
     lambda r: r["Channel Display Name"]
-              if pd.notna(r["Channel Display Name"]) and r["Channel Display Name"] 
-              else final_lookup.get(str(r["Channel ID"]), str(r["Channel ID"])), 
+              if pd.notna(r["Channel Display Name"]) and r["Channel Display Name"]
+              else final_lookup.get(str(r["Channel ID"]), str(r["Channel ID"])),
     axis=1
 )
 
-# Create the columns you want
 final_df["State"] = "Actual"
 final_df["1 - Category"] = "Revenue"
 final_df["2 - Subcategory"] = "Ad Revenue"
@@ -242,7 +256,6 @@ final_df["Actual Date"] = final_df["date_str"]
 final_df["3 - Specifier"] = final_df["specifier"]
 final_df["4 - Detail"] = final_df["revenue_col"]
 
-# Reorder columns
 final_df = final_df[
     [
         "State",
@@ -258,19 +271,16 @@ final_df = final_df[
 ].copy()
 
 #############################################################################
-# 10) Save final DataFrame to CSV and upload to the same Drive folder
+# 11) Save the final CSV locally and upload it to the Drive folder
 #############################################################################
-now_str = datetime.now().strftime("%Y-%m-%d")  # or include time if you prefer
+now_str = datetime.now().strftime("%Y-%m-%d")
 output_filename = f"Consolidated Earnings Sheet {now_str}.csv"
-
-# Save locally first
-local_path = f"/tmp/{output_filename}"  # or any local path
+local_path = f"/tmp/{output_filename}"
 final_df.to_csv(local_path, index=False)
 
-# Then upload to Drive
 upload_file = drive.CreateFile({
     'title': output_filename,
-    'parents': [{'id': folder_id}],  # put it in the same folder
+    'parents': [{'id': folder_id}],
 })
 upload_file.SetContentFile(local_path)
 upload_file.Upload()
