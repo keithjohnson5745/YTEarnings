@@ -9,12 +9,27 @@ from pydrive.drive import GoogleDrive
 import pandas as pd
 import io
 import re
+import subprocess
 from datetime import datetime
+import os
+
 
 #############################################################################
 # 1) Prompt for the Google Drive folder URL and extract the folder ID
 #############################################################################
-folder_url = input("Enter the Google Drive folder URL: ").strip()
+def ask_for_folder_url():
+    # Use osascript to display a dialog box that asks for the folder URL.
+    script = 'display dialog "Enter the Google Drive folder URL:" default answer ""'
+    proc = subprocess.Popen(["osascript", "-e", script], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    output, _ = proc.communicate()
+    output = output.decode("utf-8").strip()
+    # The output will be something like: "button returned:OK, text returned:YOUR_URL"
+    for part in output.split(","):
+        if "text returned:" in part:
+            return part.split("text returned:")[1].strip()
+    return ""
+
+folder_url = ask_for_folder_url()
 
 # Look for the folder ID pattern in the URL (after "/folders/")
 match = re.search(r'/folders/([a-zA-Z0-9_-]+)', folder_url)
@@ -51,7 +66,7 @@ revenue_column_map = {
 # 4) List of filename prefixes for which we always skip the first row
 #############################################################################
 skip_first_row_prefixes = [
-    "Subscription Revenue Video Report",
+    #"Subscription Revenue Video Report",
     "Paid Features Report",
     "Shorts Subscription Revenue Video Summary",
     "Premium Non Music Asset Video Summary"
