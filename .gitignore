@@ -1,3 +1,7 @@
 venv/
-/Users/keithjohnson/Desktop/YTEarnings/client_secrets.json
+client_secrets.json
 .DS_Store
+
+# PyDrive credentials
+credentials.json
+token.json
